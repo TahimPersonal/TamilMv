@@ -1,87 +1,110 @@
 import os
+import time
+import telebot
+from telethon import TelegramClient
+from apscheduler.schedulers.background import BackgroundScheduler
+from dotenv import load_dotenv
 import requests
 from bs4 import BeautifulSoup
-from telegram import Bot
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
+from postingformat import format_post
+from command import handle_start, handle_latest, handle_buttons, check_permissions
 
-# Load environment variables
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-OWNER = os.getenv('OWNER')
+# Load environment variables from .env
+load_dotenv()
+
+# Bot setup
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+OWNER_ID = os.getenv('OWNER_ID')
 RSS_CHANNEL_ID = os.getenv('RSS_CHANNEL_ID')
 LINK_LOG_CHANNEL_ID = os.getenv('LINK_LOG_CHANNEL_ID')
+CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL'))
+WEBSITE_URL = os.getenv('WEBSITE_URL')
 
-# Create the bot instance
-bot = Bot(token=TELEGRAM_BOT_TOKEN)
+# API credentials for Telethon
+API_ID = os.getenv('API_ID')
+API_HASH = os.getenv('API_HASH')
 
-# Function to fetch the latest post
-def get_latest_post():
-    main_url = 'https://www.1tamilmv.pm/'  # Updated website URL
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/106.0.0.0 Safari/537.36',
-    }
+# Initialize Telethon client
+client = TelegramClient('bot_session', API_ID, API_HASH)
+client.start()
 
+# Initialize the bot
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# Function to fetch the latest magnet links
+async def fetch_magnet_links():
     try:
-        web = requests.get(main_url, headers=headers)
-        soup = BeautifulSoup(web.text, 'lxml')
+        # Using Telethon client to scrape data from the website
+        response = requests.get(WEBSITE_URL)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            posts = soup.find_all('div', {'class': 'ipsType_break ipsContained'})
 
-        # Get the first post (latest)
-        latest_post = soup.find_all('div', {'class': 'ipsType_break ipsContained'})[0]
-        title = latest_post.findAll('a')[0].text.strip()
-        link = latest_post.find('a')['href']
-        magnet_links = get_magnet_links(link)
+            if posts:
+                for post in posts:
+                    title = post.find('a').text.strip()
+                    link = post.find('a')['href']
+                    magnet_link = get_magnet_link(link)
 
-        if magnet_links:
-            # Construct the formatted message
-            message = f"/qbleech1 {magnet_links[0]}\nTag: @Mr_official_300 2142536515"
-            return message
+                    # Format the post before sending
+                    formatted_post = format_post(title, magnet_link)
+
+                    # Send the formatted post to the RSS channel
+                    await client.send_message(RSS_CHANNEL_ID, formatted_post)
+                    time.sleep(random.uniform(2, 4))  # Random sleep to avoid detection
+
+                    # Send title, quality, and languages to the log channel
+                    log_details = f"Title: {title}\nQuality: N/A\nLanguages: N/A"
+                    await client.send_message(LINK_LOG_CHANNEL_ID, log_details)
+                    time.sleep(random.uniform(2, 4))  # Random sleep to avoid detection
         else:
-            return "No magnet link found for the latest post."
+            print(f"Error fetching data: Status Code {response.status_code}")
 
-    except Exception as e:
-        print(f"Error fetching latest post: {e}")
-        return "Error fetching the latest post."
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching magnet links: {e}")
 
-# Function to extract magnet links from the post
-def get_magnet_links(post_url):
+# Function to extract magnet link from a post
+def get_magnet_link(url):
     try:
-        html = requests.get(post_url)
-        soup = BeautifulSoup(html.text, 'lxml')
-        magnet_links = [a['href'] for a in soup.find_all('a', href=True) if 'magnet:' in a['href']]
-        return magnet_links
+        page = requests.get(url)
+        soup = BeautifulSoup(page.text, 'html.parser')
+        magnet_link = next((a['href'] for a in soup.find_all('a', href=True) if 'magnet:' in a['href']), None)
+        return magnet_link
     except Exception as e:
-        print(f"Error retrieving magnet links: {e}")
-        return []
+        print(f"Error extracting magnet link: {e}")
+        return None
 
-# Command handler for /start command
-def start(update, context):
-    user_id = update.message.from_user.id
-    if user_id == int(OWNER):
-        welcome_message = "Hello 👋! This bot fetches magnet links and posts them to your channels.\n\nUse /latest to get the latest post's magnet link."
-        update.message.reply_text(welcome_message)
-    else:
-        update.message.reply_text("This bot is only available for the admin (CPFlix).")
+# Scheduler for periodic tasks
+scheduler = BackgroundScheduler()
 
-# Command handler for /latest command
-def latest(update, context):
-    user_id = update.message.from_user.id
-    if user_id == int(OWNER):
-        latest_post_message = get_latest_post()
-        update.message.reply_text(latest_post_message)
-    else:
-        update.message.reply_text("This bot is only available for the admin (CPFlix).")
+# Schedule the task to run every CHECK_INTERVAL seconds
+scheduler.add_job(fetch_magnet_links, 'interval', seconds=CHECK_INTERVAL)
 
-# Set up the Updater and Dispatcher
-def main():
-    updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
+# Start the scheduler
+scheduler.start()
 
-    # Add command handlers
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("latest", latest))
+# Command Handlers
+@bot.message_handler(commands=['start'])
+def start_command(message):
+    handle_start(message)
 
-    # Start the bot
-    updater.start_polling()
-    updater.idle()
+@bot.message_handler(commands=['latest'])
+def latest_command(message):
+    check_permissions(message)
+    handle_latest(message)
 
-if __name__ == '__main__':
-    main()
+@bot.message_handler(commands=['buttons'])
+def buttons_command(message):
+    check_permissions(message)
+    handle_buttons(message)
+
+# Function to check user permissions (owner only)
+def check_permissions(message):
+    if message.from_user.id != int(OWNER_ID):
+        bot.reply_to(message, "This bot is only available for the admin (owner).")
+        return False
+    return True
+
+# Running the bot
+if __name__ == "__main__":
+    bot.polling(none_stop=True)
